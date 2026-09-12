@@ -1,252 +1,26 @@
 # HInit
 
-**HInit** is a lightweight Unix-style init system written in **C**.
+HInit is the init system being developed for Hail2.
 
-It is designed around a simple principle:
+The goal is to keep the system simple, predictable, and easy to understand. HInit is written in C and is designed around a small core instead of hiding system behavior behind a large framework.
 
-> Keep PID 1 small, explicit, predictable, and composed of independent components.
+## What it does
 
-HInit is being developed as the init system for **Hail2**, but is designed to remain independent enough to be used and tested on other Unix-like systems.
+HInit runs as PID 1 and is responsible for the basic system lifecycle.
 
----
+The current machine states are:
 
-## Status
+* **MD0** — shutdown
+* **MD1** — startup
+* **MD2** — operating
 
-🚧 **Early development**
+MD1 and MD0 are one-shot states. They perform their work and return.
 
-HInit is currently functional enough to boot inside an isolated test environment and execute its system preparation and shutdown paths.
+MD2 is the normal operating state and remains active while the system is running.
 
-The project is still under active development and should **not** yet be used as the real PID 1 of a production system.
+## Services
 
----
-
-## Design
-
-HInit is divided into several independent parts instead of putting the entire init system into one large program.
-
-```text
-                    ┌──────────────┐
-                    │    HInit     │
-                    │    PID 1     │
-                    └──────┬───────┘
-                           │
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-        ▼                  ▼                  ▼
-    SYSLOAD             Modes              Signals
-        │                  │
-        │            ┌─────┼─────┐
-        │            │     │     │
-        │           MD0   MD1   MD2
-        │
-        ▼
-   System setup
-
-        │
-        ▼
-       HSV
-        │
-        ├── service 1
-        ├── service 2
-        ├── service 3
-        └── ...
-```
-
-The service system is inspired by the simplicity of runit, while HInit uses its own architecture and terminology.
-
----
-
-# Machine Modes
-
-HInit uses three machine modes:
-
-| Mode  | Name      | Purpose                                       |
-| ----- | --------- | --------------------------------------------- |
-| `MD0` | Shutdown  | Stop services and shut the machine down       |
-| `MD1` | Startup   | Prepare the system and start enabled services |
-| `MD2` | Operating | Normal system operation                       |
-
-### MD1
-
-The startup mode is responsible for bringing the system into an operational state.
-
-The startup path includes:
-
-```text
-SYSLOAD
-   │
-   ├── Virtual filesystems
-   ├── Device filesystem
-   ├── Runtime environment
-   ├── Filesystem checks
-   ├── Filesystem mounts
-   └── Swap
-          │
-          ▼
-        MD1
-          │
-          ▼
-      Services
-```
-
-### MD2
-
-`MD2` represents the normal operating state of the machine.
-
-This is where the system remains after startup is complete.
-
-### MD0
-
-`MD0` is the shutdown state.
-
-The shutdown path is responsible for stopping services and preparing the system for kernel shutdown:
-
-```text
-MD0
- │
- ├── Stop HSV instances
- ├── Shutdown hooks
- ├── Disable swap
- ├── Unmount filesystems
- ├── sync()
- └── kernel poweroff
-```
-
----
-
-# SYSLOAD
-
-`SYSLOAD` is the system preparation layer.
-
-Its purpose is to prepare the basic runtime environment before HInit enters the machine's normal modes.
-
-Current preparation phases include:
-
-```text
-Virtual filesystem
-        ↓
-Device filesystem
-        ↓
-Runtime environment
-        ↓
-Filesystem checks
-        ↓
-Filesystem mounts
-        ↓
-Swap
-```
-
-The implementation lives in:
-
-```text
-[SYSLOAD]/
-├── sysload.c
-├── sysload.h
-├── sysdown.c
-└── sysdown.h
-```
-
----
-
-# SYSDOWN
-
-`SYSDOWN` handles system shutdown preparation.
-
-Its current responsibilities include:
-
-* disabling swap
-* unmounting filesystems
-* synchronizing filesystem buffers
-* requesting kernel poweroff
-
-The shutdown implementation uses the kernel reboot interface:
-
-```c
-reboot(RB_POWER_OFF);
-```
-
-The intention is to keep shutdown explicit rather than building another large abstraction layer around it.
-
----
-
-# HSV
-
-**HSV — HInit Service Supervisor**
-
-HSV is the per-service supervisor used by HInit.
-
-The design is intentionally similar to the idea behind runit's `runsv`:
-
-> One supervisor instance belongs to one service.
-
-For example:
-
-```text
-HSV nginx
-HSV sshd
-HSV dbus
-HSV cron
-```
-
-Each instance is responsible for its own service lifecycle.
-
-A service can contain:
-
-```text
-service/
-├── run
-├── stop
-└── finish
-```
-
-### `run`
-
-Starts the service.
-
-### `stop`
-
-Requests service shutdown.
-
-### `finish`
-
-Runs after the service terminates.
-
-HSV also supervises the service process and can restart it when appropriate.
-
----
-
-# Service Loading
-
-Services are enabled through filesystem links rather than through a complicated database.
-
-The startup directory is:
-
-```text
-/etc/hinit/[LOAD]/onboot/
-```
-
-For example:
-
-```bash
-ln -s /etc/hinit/[SV]/nginx \
-    /etc/hinit/[LOAD]/onboot/nginx
-```
-
-Removing the link disables the service:
-
-```bash
-rm /etc/hinit/[LOAD]/onboot/nginx
-```
-
-This keeps **service administration** separate from **service enablement**.
-
-HInit does not need a database to know which services are enabled.
-
-The filesystem itself describes the configuration.
-
----
-
-# Service Directory
+HInit uses a service layout inspired by runit.
 
 Services live under:
 
@@ -254,111 +28,113 @@ Services live under:
 /etc/hinit/[SV]/
 ```
 
-Example:
+A service can have scripts such as:
 
 ```text
-/etc/hinit/[SV]/
-└── nginx/
-    ├── run
-    ├── stop
-    └── finish
+run
+stop
+finish
 ```
 
-Enabled services are represented by links in:
+The service loader is responsible for deciding which services should be started during boot.
+
+Enabled boot services are represented through:
 
 ```text
 /etc/hinit/[LOAD]/onboot/
 ```
 
----
+The service supervisor (`hsv`) is responsible for supervising individual services and restarting them when necessary.
 
-# Planned Control Interface
+HInit itself remains responsible for the machine state. Service supervision is kept separate from the machine-state logic.
 
-HInit is planned to expose a Unix domain socket for communication with PID 1:
+## System startup
 
-```text
-/run/hinit/feed.sock
-```
+Startup is handled by **MD1**.
 
-The communication layer will be handled by **HInit Feed**.
-
-The protocol is intended to remain lightweight and human-readable.
-
-Example commands:
+The general flow is:
 
 ```text
-[MD0]
-[MD1]
-[MD2]
-
-[POWEROFF]
-[REBOOT]
+HInit
+  |
+  v
+MD1
+  |
+  +-- system preparation
+  |
+  +-- load onboot services
+  |
+  v
+MD2
 ```
 
-Service administration will remain separate from PID 1 control.
+System preparation is kept outside the main engine in `[SYSLOAD]`.
 
----
+## Shutdown
 
-# HInit Feed
+Shutdown is handled by **MD0**.
 
-`hinitfeed` will communicate directly with the HInit PID 1 process.
-
-Its responsibility is machine-level control.
-
-Examples:
-
-```bash
-hinitfeed [MD0]
-hinitfeed [MD1]
-hinitfeed [MD2]
-
-hinitfeed [POWEROFF]
-hinitfeed [REBOOT]
-```
-
-It will **not** be responsible for directly administering individual services.
-
----
-
-# HSV Control
-
-Service administration will be handled separately by:
+The general flow is:
 
 ```text
-hsvctl
+MD0
+  |
+  +-- stop supervised services
+  |
+  +-- system shutdown preparation
+  |
+  v
+shutdown
 ```
 
-`hsvctl` will communicate with the HSV instances and provide operations such as:
+There is no `onshut` service directory. Shutdown handling belongs to MD0 and SYSDOWN.
+
+## Logging
+
+HInit has its own small logging system.
+
+Components send messages through:
+
+```c
+log_write(
+    "HINIT",
+    "STARTING PID 1",
+    LOG_LEVEL_LOG
+);
+```
+
+The available levels are:
 
 ```text
-start
-stop
-restart
-status
+LOG
+WARN
+CRITICAL
+FATAL
 ```
 
-The distinction is intentional:
+Logs are written to:
 
 ```text
-hinitfeed
-    │
-    └── HInit / machine state
-
-hsvctl
-    │
-    └── HSV / services
+/var/log/logs.log
 ```
 
-Service enablement remains filesystem-based.
+The log format is intentionally simple:
 
----
+```text
+[09/11/2026] [23:14] MD2 SYSTEM OPERATING LOG
+[09/11/2026] [23:15] SYSLOAD FSCK FAILED WARN
+```
 
-# Project Structure
+The `logger` program provides a terminal interface for viewing the log file.
 
-Current project structure:
+## Source tree
+
+The project is organized into a few main parts:
 
 ```text
 hinit/
+├── Makefile
+│
 ├── [ENG]/
 │   ├── hinit.c
 │   ├── hinit.h
@@ -366,184 +142,79 @@ hinit/
 │   ├── load.c
 │   ├── mode.c
 │   ├── process.c
-│   ├── process.h
 │   └── signal.c
 │
-├── [LOAD]/
-│   ├── onboot/
-│   └── onshut/
+├── [FEED]/
+│   ├── feed.c
+│   └── feed.h
+│
+├── [LOG]/
+│   ├── log.c
+│   ├── log.h
+│   └── logger.c
 │
 ├── [MD]/
-│   ├── md0/
-│   ├── md1/
-│   └── md2/
+│   ├── md0.c
+│   ├── md1.c
+│   └── md2.c
 │
-├── [SV]/
-│
-├── [SYSLOAD]/
-│   ├── sysload.c
-│   ├── sysload.h
-│   ├── sysdown.c
-│   └── sysdown.h
-│
-└── Makefile
+└── [SYSLOAD]/
+    ├── sysload.c
+    ├── sysload.h
+    ├── sysdown.c
+    └── sysdown.h
 ```
 
-The bracketed directory names are intentional and are part of the project's organization.
+`[ENG]` contains the main HInit engine and service supervisor.
 
----
+`[MD]` contains the machine-state implementations.
 
-# Building
+`[SYSLOAD]` contains system preparation and shutdown preparation.
 
-HInit currently uses GCC for development.
+`[LOG]` contains the logging system and the log viewer.
 
-Build the project with:
+`[FEED]` provides the control interface for HInit.
+
+## Building
+
+The Makefile is intentionally only a build system.
+
+It does not install anything, create a fake root, or run tests.
+
+Build everything with:
 
 ```bash
 make
 ```
 
-The resulting binaries are placed in:
+Clean the build directory with:
+
+```bash
+make clean
+```
+
+Build artifacts are kept in:
 
 ```text
 [ENG]/build/
 ```
 
-The main binaries are:
-
-```text
-[ENG]/build/hinit
-[ENG]/build/hsv
-```
-
----
-
-# Testing
-
-HInit can currently be tested inside an isolated root filesystem using Linux namespaces.
-
-The project Makefile provides:
+The compiler can be selected when invoking Make. For example:
 
 ```bash
-make test
+make CC=gcc
 ```
 
-The test environment uses:
-
-```text
-mount namespace
-PID namespace
-/proc
-isolated root filesystem
-```
-
-This allows HInit to run as PID 1 without replacing the host system's real init.
-
----
-
-# Installation
-
-The current installation target installs:
-
-```text
-/sbin/hinit
-/usr/lib/hinit/hsv
-```
-
-and creates the required HInit directories under:
-
-```text
-/etc/hinit/
-```
-
-Installation:
+or:
 
 ```bash
-sudo make install
+make CC=clang
 ```
 
-**Do not use this as your real PID 1 on a production system yet.**
+## Current status
 
----
+HInit is still under development.
 
-# Development Philosophy
+The basic machine-state architecture, service supervision, system-load separation, and logging system are being built before the project is considered ready for actual Hail2 boot integration.
 
-HInit intentionally avoids unnecessary complexity.
-
-The project favors:
-
-* C
-* POSIX/Linux primitives
-* Unix domain sockets
-* filesystem-based configuration
-* independent processes
-* explicit process supervision
-* small components
-* predictable behavior
-* simple service definitions
-
-HInit does **not** aim to reproduce systemd's architecture.
-
-The goal is a Unix-style init where the important parts of the system can be inspected directly and understood without requiring a large abstraction stack.
-
----
-
-# Roadmap
-
-### Current
-
-* [x] PID 1 prototype
-* [x] SYSLOAD
-* [x] SYSDOWN
-* [x] MD0 / MD1 / MD2
-* [x] Process management
-* [x] Signal handling
-* [x] HSV prototype
-* [x] Per-service HSV model
-* [x] Filesystem-based service enablement
-* [x] Isolated PID 1 testing
-
-### Next
-
-* [ ] HInit Feed
-* [ ] Unix domain socket interface
-* [ ] `hinitfeed`
-* [ ] `hsvctl`
-* [ ] Full service lifecycle management
-* [ ] Better signal handling
-* [ ] Service status reporting
-* [ ] Robust child reaping
-* [ ] More complete boot/shutdown handling
-* [ ] Real hardware boot testing
-
-### Future
-
-* [ ] Production-ready PID 1
-* [ ] Hail2 integration
-* [ ] Additional service supervision features
-* [ ] Documentation
-* [ ] Portability improvements
-
----
-
-# Warning
-
-HInit is experimental software.
-
-Running an init system as PID 1 directly controls the lifecycle of the entire operating system.
-
-Until HInit reaches production readiness, use the isolated test environment or a disposable virtual machine.
-
----
-
-# License
-
-License: **TBD**
-
----
-
-# Hail2
-
-HInit is being developed as part of the **Hail2** operating system project.
-
-Hail2 is intended to use a lightweight Unix-style userspace with a focus on explicit system components and minimal unnecessary abstraction.
+The project is intentionally being built piece by piece instead of trying to implement the whole init system at once.
